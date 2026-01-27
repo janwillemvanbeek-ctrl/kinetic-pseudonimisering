@@ -213,6 +213,7 @@ class Pseudonimiseerder:
         self._gevonden_datums: List[datetime] = []
         self.statistieken: Dict[str, int] = defaultdict(int)
         self.waarschuwingen: List[str] = []
+        self._ongeval_automatisch_gevonden: bool = False
     
     def _get_label(self, categorie: str, origineel: str, mapping: Dict[str, str]) -> str:
         key = origineel.lower().strip()
@@ -233,10 +234,8 @@ class Pseudonimiseerder:
         - 2 jaar ervoor: [-2 jaar]
         """
         if not self.referentie_datum:
-            if self._gevonden_datums:
-                self.referentie_datum = min(self._gevonden_datums)
-            else:
-                return "[DATUM]"
+            # Geen referentiedatum beschikbaar - gebruik generiek label
+            return "[DATUM]"
         
         delta = (datum - self.referentie_datum).days
         
@@ -379,6 +378,60 @@ class Pseudonimiseerder:
         
         return gevonden
     
+    def _vind_ongevalsdatum(self, tekst: str, alle_datum_matches: List[Tuple[int, int, str, datetime]]) -> Optional[datetime]:
+        """
+        Zoekt automatisch naar de ongevalsdatum in de tekst.
+        Kijkt naar woorden zoals 'ongeval', 'ongeluk', 'incident', 'aanrijding' 
+        en vindt de dichtstbijzijnde datum.
+        """
+        # Zoekwoorden die duiden op een ongeval/incident
+        ongeval_keywords = [
+            r'ongeval',
+            r'ongeluk', 
+            r'incident',
+            r'aanrijding',
+            r'botsing',
+            r'valpartij',
+            r'bedrijfsongeval',
+            r'verkeersongeval',
+            r'arbeidsongeval',
+            r'trauma',
+            r'letsel\s+opgelopen',
+            r'betrokken\s+bij',
+        ]
+        
+        pattern = re.compile(
+            r'(' + '|'.join(ongeval_keywords) + r')',
+            re.IGNORECASE
+        )
+        
+        # Vind alle ongeval-gerelateerde woorden
+        ongeval_posities = [(m.start(), m.end()) for m in pattern.finditer(tekst)]
+        
+        if not ongeval_posities or not alle_datum_matches:
+            return None
+        
+        # Vind de datum die het dichtst bij een ongeval-woord staat
+        beste_datum = None
+        kleinste_afstand = float('inf')
+        
+        for ong_start, ong_end in ongeval_posities:
+            for datum_start, datum_end, _, datum_obj in alle_datum_matches:
+                # Bereken afstand (in karakters) tussen ongeval-woord en datum
+                if datum_end <= ong_start:
+                    afstand = ong_start - datum_end
+                elif datum_start >= ong_end:
+                    afstand = datum_start - ong_end
+                else:
+                    afstand = 0  # Overlappen
+                
+                # We zoeken binnen 200 karakters (ongeveer 2-3 regels)
+                if afstand < kleinste_afstand and afstand < 200:
+                    kleinste_afstand = afstand
+                    beste_datum = datum_obj
+        
+        return beste_datum
+    
     def _detecteer_datums(self, tekst: str) -> List[Tuple[int, int, str, str]]:
         gevonden = []
         alle_matches = []
@@ -395,7 +448,14 @@ class Pseudonimiseerder:
                 if datum:
                     alle_matches.append((match.start(), match.end(), match.group(0), datum))
         
+        # Sla alle gevonden datums op
         self._gevonden_datums.extend([d for _, _, _, d in alle_matches])
+        
+        # Als er nog geen referentiedatum is, probeer de ongevalsdatum te vinden
+        if not self.referentie_datum and self.gebruik_relatieve_datums:
+            self.referentie_datum = self._vind_ongevalsdatum(tekst, alle_matches)
+            if self.referentie_datum:
+                self._ongeval_automatisch_gevonden = True
         
         for start, eind, origineel, datum in alle_matches:
             if self.gebruik_relatieve_datums:
@@ -529,7 +589,7 @@ def main():
                     referentie_datum = datetime.combine(referentie_datum, datetime.min.time())
                     st.success(f"✓ Ongevalsdatum: {referentie_datum.strftime('%d-%m-%Y')}")
             else:
-                st.info("💡 Zonder ongevalsdatum wordt de eerste datum in het dossier als referentie gebruikt.")
+                st.info("💡 De tool zoekt automatisch naar woorden zoals 'ongeval', 'ongeluk', 'aanrijding' en gebruikt de bijbehorende datum.")
             
             st.markdown("---")
             st.markdown("##### 📖 Voorbeeld tijdlijn")
@@ -612,6 +672,14 @@ def main():
                 st.session_state['resultaat'] = resultaat
                 st.session_state['statistieken'] = dict(pseudo.statistieken)
                 st.session_state['totaal'] = sum(pseudo.statistieken.values())
+                
+                # Sla info over ongevalsdatum op
+                if pseudo.referentie_datum:
+                    st.session_state['ongevalsdatum'] = pseudo.referentie_datum
+                    st.session_state['ongeval_auto'] = pseudo._ongeval_automatisch_gevonden
+                else:
+                    st.session_state['ongevalsdatum'] = None
+                    st.session_state['ongeval_auto'] = False
         else:
             st.warning("⚠️ Voer eerst tekst in of upload een bestand.")
     
@@ -630,6 +698,16 @@ def main():
                 <span style="font-size: 1.5rem; font-weight: bold;">{totaal}</span> items vervangen
             </div>
             """, unsafe_allow_html=True)
+            
+            # Toon info over ongevalsdatum
+            if 'ongevalsdatum' in st.session_state and st.session_state['ongevalsdatum']:
+                datum_str = st.session_state['ongevalsdatum'].strftime('%d-%m-%Y')
+                if st.session_state.get('ongeval_auto', False):
+                    st.info(f"📅 **Ongevalsdatum automatisch gedetecteerd:** {datum_str}")
+                else:
+                    st.info(f"📅 **Ongevalsdatum (handmatig):** {datum_str}")
+            elif gebruik_relatieve_datums:
+                st.warning("⚠️ Geen ongevalsdatum gevonden. Datums worden als [DATUM] weergegeven. Vul de ongevalsdatum in voor een relatieve tijdlijn.")
             
             # Stats grid
             if stats:

@@ -298,45 +298,108 @@ class Pseudonimiseerder:
     def _detecteer_namen(self, tekst: str, email_posities: List[Tuple[int, int]]) -> List[Tuple[int, int, str, str]]:
         gevonden = []
         
+        # Houdt bij welke achternamen we al gezien hebben (voor consistentie)
+        if not hasattr(self, '_achternaam_naar_label'):
+            self._achternaam_naar_label: Dict[str, str] = {}
+        
         def in_email(start: int, eind: int) -> bool:
             for e_start, e_eind in email_posities:
                 if e_start <= start < e_eind or e_start < eind <= e_eind:
                     return True
             return False
         
-        tv_pattern = r'(?:van\s+de|van\s+den|van\s+der|van\s+het|van\s+\'t|van|de|het|ter|ten)'
+        def normaliseer_achternaam(naam: str) -> str:
+            """Normaliseert een achternaam voor consistente matching."""
+            naam = naam.lower().strip()
+            # Verwijder titels
+            naam = re.sub(r'^(de\s+)?(heer|mevrouw|mevr\.|dhr\.|mr\.|dr\.|prof\.)\s+', '', naam)
+            # Verwijder bekende voornamen aan het begin
+            woorden = naam.split()
+            if woorden and woorden[0] in VOORNAMEN:
+                naam = ' '.join(woorden[1:])
+            return naam.strip()
         
-        # Voornamen met achternaam
+        def get_naam_label(volledige_naam: str) -> str:
+            """Haalt label op, met consistentie voor achternamen."""
+            achternaam = normaliseer_achternaam(volledige_naam)
+            
+            # Check of we deze achternaam al eerder hebben gezien
+            if achternaam and achternaam in self._achternaam_naar_label:
+                return self._achternaam_naar_label[achternaam]
+            
+            # Nieuw label maken
+            label = self._get_label("naam", volledige_naam, self._naam_mapping)
+            if achternaam:
+                self._achternaam_naar_label[achternaam] = label
+            return label
+        
+        def al_gevonden_op_positie(start: int, eind: int) -> bool:
+            """Check of deze positie al gedekt is."""
+            for s, e, _, _ in gevonden:
+                if not (eind <= s or start >= e):  # Overlapping
+                    return True
+            return False
+        
+        tv_pattern = r'(?:van\s+de|van\s+den|van\s+der|van\s+het|van\s+\'t|van|de|het|ter|ten|op\s+de|in\s+\'t)'
+        
+        # STAP 1: Titels met naam - eerst lange matches (met voornaam én achternaam)
+        titels_lang_pattern = re.compile(
+            rf'\b((?:de\s+)?(?:heer|mevrouw|mevr\.|dhr\.|mr\.|dr\.|prof\.)\s+'
+            rf'[A-Z][a-zëéèêïíìîöóòôüúùû]+\s+'  # voornaam (verplicht voor dit pattern)
+            rf'(?:(?:{tv_pattern})\s+)?'  # optioneel tussenvoegsel
+            rf'[A-Z][a-zëéèêïíìîöóòôüúùû]+)\b',  # achternaam
+            re.IGNORECASE
+        )
+        for match in titels_lang_pattern.finditer(tekst):
+            if not in_email(match.start(), match.end()):
+                matched_text = match.group(1)
+                label = get_naam_label(matched_text)
+                gevonden.append((match.start(), match.start() + len(matched_text), matched_text, label))
+        
+        # Dan kortere matches (alleen titel + achternaam, zonder voornaam)
+        titels_kort_pattern = re.compile(
+            rf'\b((?:de\s+)?(?:heer|mevrouw|mevr\.|dhr\.|mr\.|dr\.|prof\.)\s+'
+            rf'(?:(?:{tv_pattern})\s+)?'  # optioneel tussenvoegsel
+            rf'[A-Z][a-zëéèêïíìîöóòôüúùû]+)\b',  # achternaam
+            re.IGNORECASE
+        )
+        for match in titels_kort_pattern.finditer(tekst):
+            if not in_email(match.start(), match.end()) and not al_gevonden_op_positie(match.start(), match.end()):
+                matched_text = match.group(1)
+                label = get_naam_label(matched_text)
+                gevonden.append((match.start(), match.start() + len(matched_text), matched_text, label))
+        
+        # STAP 2: Voornamen met achternaam (Jan van der Berg)
         for voornaam in VOORNAMEN:
             pattern = re.compile(
-                rf'\b({re.escape(voornaam)})\s+((?:{tv_pattern})\s+)?([A-Z][a-zëéèêïíìîöóòôüúùû]+)\b',
+                rf'\b({re.escape(voornaam)})\s+'
+                rf'((?:{tv_pattern})\s+)?'
+                rf'([A-Z][a-zëéèêïíìîöóòôüúùû]+)\b',
                 re.IGNORECASE
             )
             for match in pattern.finditer(tekst):
-                if not in_email(match.start(), match.end()):
-                    label = self._get_label("naam", match.group(0), self._naam_mapping)
+                if not in_email(match.start(), match.end()) and not al_gevonden_op_positie(match.start(), match.end()):
+                    label = get_naam_label(match.group(0))
                     gevonden.append((match.start(), match.end(), match.group(0), label))
         
-        # Titels met naam
-        titels_pattern = re.compile(
-            rf'\b((?:de\s+)?(?:heer|mevrouw|mevr\.|dhr\.|mr\.|dr\.|prof\.)\s+(?:{tv_pattern}\s+)?[A-Z][a-zëéèêïíìîöóòôüúùû]+)\b',
-            re.IGNORECASE
+        # STAP 3: Losse achternamen met tussenvoegsel (Van der Berg, De Vries, etc.)
+        # Match alleen als het begint met hoofdletter tussenvoegsel
+        losse_achternaam_pattern = re.compile(
+            rf'\b((?:Van|De|Het|Ter|Ten|Op|In)\s+(?:de\s+|den\s+|der\s+|het\s+|\'t\s+)?[A-Z][a-zëéèêïíìîöóòôüúùû]+)\b'
         )
-        for match in titels_pattern.finditer(tekst):
-            if not in_email(match.start(), match.end()):
-                al_gevonden = any(s <= match.start() < e for s, e, _, _ in gevonden)
-                if not al_gevonden:
-                    label = self._get_label("naam", match.group(0), self._naam_mapping)
-                    gevonden.append((match.start(), match.end(), match.group(0), label))
+        for match in losse_achternaam_pattern.finditer(tekst):
+            if not in_email(match.start(), match.end()) and not al_gevonden_op_positie(match.start(), match.end()):
+                label = get_naam_label(match.group(1))
+                gevonden.append((match.start(), match.end(), match.group(1), label))
         
-        # Bekende achternamen
+        # STAP 4: Bekende achternamen uit de lijst (zonder tussenvoegsel)
         for achternaam in ACHTERNAMEN:
-            pattern = re.compile(rf'\b((?:{tv_pattern}\s+)?{re.escape(achternaam)})\b', re.IGNORECASE)
-            for match in pattern.finditer(tekst):
-                if not in_email(match.start(), match.end()):
-                    al_gevonden = any(s <= match.start() < e or s < match.end() <= e for s, e, _, _ in gevonden)
-                    if not al_gevonden:
-                        label = self._get_label("naam", match.group(0), self._naam_mapping)
+            # Skip achternamen die al tussenvoegsels bevatten (die worden hierboven al gevangen)
+            if not any(tv in achternaam.lower() for tv in ['van ', 'de ', 'het ', 'ter ', 'ten ']):
+                pattern = re.compile(rf'\b({re.escape(achternaam)})\b', re.IGNORECASE)
+                for match in pattern.finditer(tekst):
+                    if not in_email(match.start(), match.end()) and not al_gevonden_op_positie(match.start(), match.end()):
+                        label = get_naam_label(match.group(0))
                         gevonden.append((match.start(), match.end(), match.group(0), label))
         
         return gevonden

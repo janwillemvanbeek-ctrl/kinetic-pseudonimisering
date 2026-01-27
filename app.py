@@ -222,6 +222,16 @@ class Pseudonimiseerder:
         return mapping[key]
     
     def _datum_naar_relatief(self, datum: datetime) -> str:
+        """
+        Converteert een datum naar een leesbare relatieve notatie t.o.v. het ongeval/incident.
+        
+        Voorbeelden:
+        - Dag van ongeval: [ONGEVAL]
+        - 3 dagen erna: [+3 dagen]
+        - 2 weken ervoor: [-2 weken]
+        - 6 maanden erna: [+6 maanden]
+        - 2 jaar ervoor: [-2 jaar]
+        """
         if not self.referentie_datum:
             if self._gevonden_datums:
                 self.referentie_datum = min(self._gevonden_datums)
@@ -229,12 +239,62 @@ class Pseudonimiseerder:
                 return "[DATUM]"
         
         delta = (datum - self.referentie_datum).days
+        
+        # Exact de ongevalsdatum
         if delta == 0:
-            return "[T+0]"
-        elif delta > 0:
-            return f"[T+{delta}]"
+            return "[ONGEVAL]"
+        
+        # Bepaal de beste eenheid
+        abs_delta = abs(delta)
+        teken = "+" if delta > 0 else "-"
+        
+        if abs_delta == 1:
+            eenheid = "dag"
+            waarde = 1
+        elif abs_delta < 7:
+            # Dagen (2-6 dagen)
+            eenheid = "dagen"
+            waarde = abs_delta
+        elif abs_delta < 14:
+            # 1 week
+            eenheid = "week"
+            waarde = 1
+        elif abs_delta < 28:
+            # Weken (2-4 weken)
+            weken = round(abs_delta / 7)
+            eenheid = "weken" if weken > 1 else "week"
+            waarde = weken
+        elif abs_delta < 60:
+            # 1-2 maanden
+            maanden = round(abs_delta / 30)
+            eenheid = "maand" if maanden == 1 else "maanden"
+            waarde = maanden
+        elif abs_delta < 365:
+            # Maanden (2-11 maanden)
+            maanden = round(abs_delta / 30)
+            eenheid = "maanden"
+            waarde = maanden
+        elif abs_delta < 730:
+            # 1 jaar of jaar + maanden
+            jaren = abs_delta // 365
+            rest_maanden = round((abs_delta % 365) / 30)
+            if rest_maanden == 0:
+                eenheid = "jaar"
+                waarde = jaren
+            elif rest_maanden < 2:
+                eenheid = "jaar"
+                waarde = jaren
+            else:
+                return f"[{teken}{jaren} jaar, {rest_maanden} mnd]"
         else:
-            return f"[T{delta}]"
+            # Meerdere jaren
+            jaren = round(abs_delta / 365, 1)
+            if jaren == int(jaren):
+                jaren = int(jaren)
+            eenheid = "jaar"
+            waarde = jaren
+        
+        return f"[{teken}{waarde} {eenheid}]"
     
     def _detecteer_namen(self, tekst: str, email_posities: List[Tuple[int, int]]) -> List[Tuple[int, int, str, str]]:
         gevonden = []
@@ -446,21 +506,42 @@ def main():
         st.header("⚙️ Configuratie")
         
         gebruik_relatieve_datums = st.checkbox(
-            "Gebruik relatieve datums (T+dagen)",
+            "Gebruik relatieve tijdlijn",
             value=True,
-            help="Converteert datums naar T+0, T+365 etc. voor heldere tijdlijnen"
+            help="Converteert datums naar leesbare tijdlijn relatief aan het ongeval"
         )
         
         referentie_datum = None
         if gebruik_relatieve_datums:
-            use_custom_date = st.checkbox("Aangepaste referentiedatum")
+            st.markdown("##### 📅 Datum ongeval/incident")
+            use_custom_date = st.checkbox(
+                "Ongevalsdatum opgeven",
+                value=False,
+                help="Vink aan om de datum van het ongeval/incident in te voeren"
+            )
             if use_custom_date:
                 referentie_datum = st.date_input(
-                    "Referentiedatum",
+                    "Wanneer vond het ongeval plaats?",
+                    value=None,
                     help="Alle datums worden relatief aan deze datum weergegeven"
                 )
                 if referentie_datum:
                     referentie_datum = datetime.combine(referentie_datum, datetime.min.time())
+                    st.success(f"✓ Ongevalsdatum: {referentie_datum.strftime('%d-%m-%Y')}")
+            else:
+                st.info("💡 Zonder ongevalsdatum wordt de eerste datum in het dossier als referentie gebruikt.")
+            
+            st.markdown("---")
+            st.markdown("##### 📖 Voorbeeld tijdlijn")
+            st.markdown("""
+            ```
+            [ONGEVAL]      = dag van incident
+            [-2 weken]     = 2 weken vóór ongeval
+            [+3 dagen]     = 3 dagen na ongeval  
+            [+6 maanden]   = 6 maanden na ongeval
+            [+1 jaar, 3 mnd] = 1 jaar en 3 maanden
+            ```
+            """)
         
         st.markdown("---")
         
@@ -589,7 +670,20 @@ def main():
         2. **Patroonherkenning**: De tool zoekt naar bekende patronen (BSN, postcodes, datums, etc.)
         3. **Nederlandse context**: Speciaal geoptimaliseerd voor Nederlandse namen, ziekenhuizen en adresformaten
         4. **Consistente vervanging**: Dezelfde naam krijgt altijd hetzelfde label (bijv. [NAAM_1])
-        5. **Relatieve tijdlijn**: Datums worden omgezet naar T+dagen voor betere medische analyse
+        
+        ### 📅 Relatieve tijdlijn
+        
+        Datums worden omgezet naar een leesbare tijdlijn relatief aan het ongeval/incident:
+        
+        | Origineel | Wordt | Betekenis |
+        |-----------|-------|-----------|
+        | 14 juni 2021 | [ONGEVAL] | De datum van het incident |
+        | 10 juni 2021 | [-4 dagen] | 4 dagen vóór het ongeval |
+        | 21 juni 2021 | [+1 week] | 1 week na het ongeval |
+        | 14 december 2021 | [+6 maanden] | 6 maanden na het ongeval |
+        | 14 juni 2023 | [+2 jaar] | 2 jaar na het ongeval |
+        
+        Dit maakt de medische chronologie veel overzichtelijker!
         
         ### BSN Validatie
         

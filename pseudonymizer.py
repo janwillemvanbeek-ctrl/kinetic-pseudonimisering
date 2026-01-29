@@ -229,6 +229,16 @@ class MedicalPseudonymizer:
         """Vervang persoonsnamen - uitgebreide detectie"""
         result = text
         
+        # 0. Internationale namen: Fatima El Amrani, Mohammed Al Hassan, Ahmed Ben Ali
+        intl_pattern = r'\b([A-Z][a-zéëïöü]+)\s+(El|Al|Ben|Ibn|Abu|Bin)\s+([A-Z][a-zéëïöüA-Z]+)\b'
+        
+        def replace_intl(match):
+            full_name = match.group(0)
+            self.statistics['names'] += 1
+            return self._get_person_pseudonym(full_name)
+        
+        result = re.sub(intl_pattern, replace_intl, result)
+        
         # 1. Volledige namen met dubbele achternaam: Sanne de Vries-van Dijk
         double_surname = r'\b([A-Z][a-zéëïöü]+)\s+((?:de|van|den|der|het|ter|ten)\s+)?([A-Z][a-zéëïöü]+)(-(?:van|de|den|der)\s+[A-Z][a-zéëïöü]+)\b'
         
@@ -291,7 +301,19 @@ class MedicalPseudonymizer:
             
         result = re.sub(honorific_pattern, replace_honorific, result, flags=re.IGNORECASE)
         
-        # 6. Simpele voornaam + achternaam: Jeroen Bakker
+        # 6. Voornaam + initial: Youssef A., Maria B.
+        name_initial_pattern = r'\b([A-Z][a-zéëïöü]{2,})\s+([A-Z])\.'
+        
+        def replace_name_initial(match):
+            full = match.group(0)
+            if '[PERSOON_' in full:
+                return full
+            self.statistics['names'] += 1
+            return self._get_person_pseudonym(full)
+            
+        result = re.sub(name_initial_pattern, replace_name_initial, result)
+        
+        # 7. Simpele voornaam + achternaam: Jeroen Bakker
         simple_pattern = r'\b([A-Z][a-zéëïöü]{2,})\s+([A-Z][a-zéëïöü]{2,})\b'
         
         # Lijst van woorden die geen namen zijn

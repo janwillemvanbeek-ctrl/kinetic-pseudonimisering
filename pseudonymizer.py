@@ -358,10 +358,18 @@ class MedicalPseudonymizer:
     def _replace_policy_numbers(self, text: str) -> str:
         """Vervang polis- en schadenummers"""
         patterns = [
+            # Polis met label
             (r'(Polis(?:nummer)?)\s*[:\s]*([A-Z0-9\-]+)', 'polis'),
+            # Schade met label  
             (r'(Schade(?:nummer)?|Schadenr\.?)\s*[:\s]*([A-Z0-9\-]+)', 'schade'),
+            # Standalone formaten
             (r'\b(POL-[A-Z]+-\d{4}-\d+)\b', 'polis'),
             (r'\b(SCH-\d{4}-\d{2}-\d+)\b', 'schade'),
+            # IP-2020-554433 formaat
+            (r'\b(IP-\d{4}-\d+)\b', 'polis'),
+            # Algemene nummer formaten na "Polis:" of "Schade:"
+            (r'(?<=Polis:\s)([A-Z]{2,4}[-\s]?\d{4}[-\s]?\d+)', 'polis'),
+            (r'(?<=Schadenummer:\s)([A-Z]{2,4}[-\s]?\d{4}[-\s]?\d+)', 'schade'),
         ]
         
         result = text

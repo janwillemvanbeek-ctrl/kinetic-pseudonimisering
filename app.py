@@ -62,6 +62,30 @@ def extract_text_from_pdf(file_path: str, method: str, dpi: int, enhance: bool, 
     return text, result.overall_confidence, result.errors
 
 
+def fix_ocr_encoding(text: str) -> str:
+    """Fix veelvoorkomende OCR encoding fouten waar - als n wordt gelezen"""
+    import re
+    result = text
+    
+    # Fix datum patronen: 05n03n2025 -> 05-03-2025
+    result = re.sub(r'(\d{2})n(\d{2})n(\d{4})', r'\1-\2-\3', result)
+    result = re.sub(r'(\d{2})n(\d{2})n(\d{2})\b', r'\1-\2-\3', result)
+    
+    # Fix telefoon patronen
+    result = re.sub(r'\b(06)n(\d{8})\b', r'\1-\2', result)
+    result = re.sub(r'\b(06)n(\d{4})n(\d{4})\b', r'\1-\2-\3', result)
+    result = re.sub(r'\b(06)n(\d{4})(\d{4})\b', r'\1-\2\3', result)
+    
+    # Fix polis/schade nummers
+    result = re.sub(r'\b([A-Z]{2,4})n(\d{4})n(\d{2})n(\d+)\b', r'\1-\2-\3-\4', result)
+    result = re.sub(r'\b([A-Z]{2,4})n(\d{4})n(\d+)\b', r'\1-\2-\3', result)
+    
+    # Fix case IDs: TLnCASEn0192 -> TL-CASE-0192
+    result = re.sub(r'\b([A-Z]{2,4})n([A-Z]+)n(\d+)\b', r'\1-\2-\3', result)
+    
+    return result
+
+
 def extract_text_from_txt(file_content: bytes) -> str:
     """Extraheer tekst uit TXT bestand"""
     # Probeer verschillende encodings
@@ -230,6 +254,8 @@ def main():
                     else:  # TXT
                         st.write("📝 Tekstbestand wordt gelezen...")
                         extracted_text = extract_text_from_txt(uploaded_file.getvalue())
+                        # Fix encoding problemen
+                        extracted_text = fix_ocr_encoding(extracted_text)
                         st.write("✓ Tekst geladen")
                     
                     # === STAP 2: PSEUDONIMISERING ===

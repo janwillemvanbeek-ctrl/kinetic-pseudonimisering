@@ -651,6 +651,27 @@ def post_process_medical_text(text: str) -> str:
     Post-processing specifiek voor medische teksten.
     Corrigeert veelvoorkomende OCR fouten in medische terminologie.
     """
+    # Fix encoding issues waar streepjes als 'n' worden gelezen
+    # Dit gebeurt soms bij slechte OCR
+    processed = text
+    
+    # Fix datum patronen waar - als n is gelezen: 05n03n2025 -> 05-03-2025
+    processed = re.sub(r'(\d{2})n(\d{2})n(\d{4})', r'\1-\2-\3', processed)
+    processed = re.sub(r'(\d{2})n(\d{2})n(\d{2})\b', r'\1-\2-\3', processed)
+    
+    # Fix telefoon patronen: 06n12345678 -> 06-12345678
+    processed = re.sub(r'\b(06)n(\d{8})\b', r'\1-\2', processed)
+    processed = re.sub(r'\b(06)n(\d{4})n(\d{4})\b', r'\1-\2-\3', processed)
+    processed = re.sub(r'\b(06)n(\d{4})(\d{4})\b', r'\1-\2\3', processed)
+    
+    # Fix polis/schade nummers: IPn2020n554433 -> IP-2020-554433
+    # SCHn2025n03n019283 -> SCH-2025-03-019283
+    processed = re.sub(r'\b([A-Z]{2,4})n(\d{4})n(\d{2})n(\d+)\b', r'\1-\2-\3-\4', processed)
+    processed = re.sub(r'\b([A-Z]{2,4})n(\d{4})n(\d+)\b', r'\1-\2-\3', processed)
+    
+    # Fix case IDs: TLnCASEn0192 -> TL-CASE-0192
+    processed = re.sub(r'\b([A-Z]{2,4})n([A-Z]+)n(\d+)\b', r'\1-\2-\3', processed)
+    
     corrections = {
         # Veelvoorkomende OCR fouten in medisch Nederlands
         r'\bpatient\b': 'patiënt',
@@ -674,7 +695,6 @@ def post_process_medical_text(text: str) -> str:
         r'(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})': r'\1-\2-\3',
     }
     
-    processed = text
     for pattern, replacement in corrections.items():
         processed = re.sub(pattern, replacement, processed, flags=re.IGNORECASE)
         

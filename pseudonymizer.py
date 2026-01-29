@@ -45,6 +45,28 @@ class MedicalPseudonymizer:
         self.address_counter = 0
         self.statistics = defaultdict(int)
         self.warnings: List[str] = []
+    
+    def _fix_ocr_encoding(self, text: str) -> str:
+        """Fix veelvoorkomende OCR encoding fouten waar - als n wordt gelezen"""
+        result = text
+        
+        # Fix datum patronen: 05n03n2025 -> 05-03-2025
+        result = re.sub(r'(\d{2})n(\d{2})n(\d{4})', r'\1-\2-\3', result)
+        result = re.sub(r'(\d{2})n(\d{2})n(\d{2})\b', r'\1-\2-\3', result)
+        
+        # Fix telefoon patronen
+        result = re.sub(r'\b(06)n(\d{8})\b', r'\1-\2', result)
+        result = re.sub(r'\b(06)n(\d{4})n(\d{4})\b', r'\1-\2-\3', result)
+        result = re.sub(r'\b(06)n(\d{4})(\d{4})\b', r'\1-\2\3', result)
+        
+        # Fix polis/schade nummers
+        result = re.sub(r'\b([A-Z]{2,4})n(\d{4})n(\d{2})n(\d+)\b', r'\1-\2-\3-\4', result)
+        result = re.sub(r'\b([A-Z]{2,4})n(\d{4})n(\d+)\b', r'\1-\2-\3', result)
+        
+        # Fix case IDs
+        result = re.sub(r'\b([A-Z]{2,4})n([A-Z]+)n(\d+)\b', r'\1-\2-\3', result)
+        
+        return result
         
     def _normalize_name(self, name: str) -> str:
         """Normaliseer naam voor consistente matching"""
@@ -63,14 +85,23 @@ class MedicalPseudonymizer:
     def _detect_incident_date(self, text: str) -> Optional[datetime]:
         """Probeer ongevalsdatum uit tekst te detecteren"""
         patterns = [
+            # Bestaande patronen
             r'(?:datum\s*)?(?:schade|ongeval|incident|trauma)\s*[:\s]*(\d{1,2}[-/]\d{1,2}[-/]\d{2,4})',
             r'(?:schade|ongeval|incident)\s*(?:op|d\.?d\.?|van)\s*[:\s]*(\d{1,2}[-/]\d{1,2}[-/]\d{2,4})',
             r'na\s+(?:val|ongeval|trauma)\s+(?:op\s+)?(\d{1,2}[-/]\d{1,2}[-/]\d{2,4})',
             r'trauma\s+(\d{1,2}[-/]\d{1,2}[-/]\d{2,4})',
+            # Nieuwe patronen
+            r'[Oo]p\s+(\d{1,2}[-/]\d{1,2}[-/]\d{2,4})\s+(?:is|werd|raakte).*?(?:ongeval|aangereden|betrokken|gewond)',
+            r'(?:verkeers)?ongeval\s+(?:op|van|d\.?d\.?)\s+(\d{1,2}[-/]\d{1,2}[-/]\d{2,4})',
+            r'betrokken\s+(?:geraakt\s+)?bij.*?(?:op|d\.?d\.?)\s+(\d{1,2}[-/]\d{1,2}[-/]\d{2,4})',
+            r'sinds\s+(\d{1,2}[-/]\d{1,2}[-/]\d{2,4})\s+(?:klachten|pijn|letsel)',
+            r'(?:letsel|schade)\s+(?:op|van|d\.?d\.?)\s+(\d{1,2}[-/]\d{1,2}[-/]\d{2,4})',
+            # Datum schade formaat
+            r'[Dd]atum\s+schade\s*[:\s]*(\d{1,2}[-/]\d{1,2}[-/]\d{2,4})',
         ]
         
         for pattern in patterns:
-            match = re.search(pattern, text, re.IGNORECASE)
+            match = re.search(pattern, text, re.IGNORECASE | re.DOTALL)
             if match:
                 parsed = self._parse_date(match.group(1))
                 if parsed:
@@ -89,18 +120,30 @@ class MedicalPseudonymizer:
         return None
         
     def _date_to_relative(self, date: datetime) -> str:
-        """Converteer datum naar relatieve notatie"""
+        """Converteer datum naar relatieve notatie met duidelijke eenheid"""
         if not self.incident_date:
             return "[DATUM]"
             
         delta = (date - self.incident_date).days
         
         if delta == 0:
-            return "[T+0]"
-        elif delta > 0:
-            return f"[T+{delta}]"
+            return "[T+0 dagen]"
+        
+        # Bepaal beste eenheid
+        abs_delta = abs(delta)
+        sign = "+" if delta > 0 else ""
+        
+        if abs_delta < 14:
+            # Minder dan 2 weken: gebruik dagen
+            return f"[T{sign}{delta} dagen]"
+        elif abs_delta < 60:
+            # 2 weken tot 2 maanden: gebruik weken
+            weeks = round(delta / 7)
+            return f"[T{sign}{weeks} weken]"
         else:
-            return f"[T{delta}]"
+            # Meer dan 2 maanden: gebruik maanden
+            months = round(delta / 30)
+            return f"[T{sign}{months} maanden]"
 
     def _replace_bsn(self, text: str) -> str:
         """Vervang BSN nummers - diverse formaten"""
@@ -405,6 +448,9 @@ class MedicalPseudonymizer:
         self.address_counter = 0
         self.statistics = defaultdict(int)
         self.warnings = []
+        
+        # EERST: Fix OCR encoding problemen (n -> -)
+        text = self._fix_ocr_encoding(text)
         
         # Detecteer ongevalsdatum
         if not self.incident_date:

@@ -1,7 +1,11 @@
 """
-Kinetic PDF Processor - Streamlit App
-======================================
-Web interface voor medische dossierverwerking met OCR.
+Kinetic Dossier Processor - Streamlit App
+==========================================
+Complete workflow voor medische dossierverwerking:
+1. Upload PDF of TXT
+2. Tekst extractie (OCR indien nodig)
+3. Automatische pseudonimisering
+4. Download resultaat
 
 Start met: streamlit run app.py
 """
@@ -10,233 +14,348 @@ import streamlit as st
 import tempfile
 import os
 from pathlib import Path
+from datetime import datetime
+from typing import Optional
 
 # Page config
 st.set_page_config(
-    page_title="Kinetic PDF Processor",
-    page_icon="📄",
+    page_title="Kinetic Dossier Processor",
+    page_icon="🏥",
     layout="wide"
 )
 
-# Import processor (met error handling)
+# Imports met error handling
+IMPORTS_OK = True
+IMPORT_ERRORS = []
+
+try:
+    from pseudonymizer import MedicalPseudonymizer, PseudonymizationResult
+except ImportError as e:
+    IMPORTS_OK = False
+    IMPORT_ERRORS.append(f"pseudonymizer.py: {e}")
+
 try:
     from pdf_processor import PDFProcessor, post_process_medical_text
-    PROCESSOR_AVAILABLE = True
+    PDF_SUPPORT = True
 except ImportError as e:
-    PROCESSOR_AVAILABLE = False
-    IMPORT_ERROR = str(e)
+    PDF_SUPPORT = False
+    IMPORT_ERRORS.append(f"pdf_processor.py (PDF support disabled): {e}")
 
 
-def check_dependencies():
-    """Check of alle dependencies geïnstalleerd zijn"""
-    missing = []
+def extract_text_from_pdf(file_path: str, method: str, dpi: int, enhance: bool, lang: str) -> tuple:
+    """Extraheer tekst uit PDF"""
+    if not PDF_SUPPORT:
+        return "", 0, ["PDF ondersteuning niet beschikbaar"]
     
-    try:
-        import pdfplumber
-    except ImportError:
-        missing.append("pdfplumber")
+    processor = PDFProcessor(
+        tesseract_lang=lang,
+        dpi=dpi,
+        enhance_images=enhance
+    )
     
-    try:
-        import pytesseract
-    except ImportError:
-        missing.append("pytesseract")
+    force_method = None if method == "auto" else method
+    result = processor.process(file_path, force_method=force_method)
     
-    try:
-        from pdf2image import convert_from_path
-    except ImportError:
-        missing.append("pdf2image")
+    # Post-process voor medische tekst
+    text = post_process_medical_text(result.combined_text)
     
-    try:
-        from PIL import Image
-    except ImportError:
-        missing.append("Pillow")
+    return text, result.overall_confidence, result.errors
+
+
+def extract_text_from_txt(file_content: bytes) -> str:
+    """Extraheer tekst uit TXT bestand"""
+    # Probeer verschillende encodings
+    encodings = ['utf-8', 'latin-1', 'cp1252', 'iso-8859-1']
     
-    try:
-        import cv2
-    except ImportError:
-        missing.append("opencv-python (optioneel)")
+    for encoding in encodings:
+        try:
+            return file_content.decode(encoding)
+        except UnicodeDecodeError:
+            continue
     
-    return missing
+    # Fallback met error handling
+    return file_content.decode('utf-8', errors='replace')
+
+
+def parse_date_input(date_str: str) -> Optional[datetime]:
+    """Parse datum input van gebruiker"""
+    if not date_str:
+        return None
+        
+    formats = ['%d-%m-%Y', '%d/%m/%Y', '%Y-%m-%d', '%d-%m-%y']
+    
+    for fmt in formats:
+        try:
+            return datetime.strptime(date_str.strip(), fmt)
+        except ValueError:
+            continue
+    
+    return None
 
 
 def main():
     # Header
-    st.title("📄 Kinetic PDF Processor")
-    st.markdown("*Medische dossierverwerking met OCR en handschrift-herkenning*")
+    st.title("🏥 Kinetic Dossier Processor")
+    st.markdown("*Upload → Extractie → Pseudonimisering*")
     
-    # Check dependencies
-    if not PROCESSOR_AVAILABLE:
-        st.error(f"❌ PDF Processor kon niet geladen worden: {IMPORT_ERROR}")
+    # Check imports
+    if not IMPORTS_OK:
+        st.error("❌ Kritieke imports ontbreken:")
+        for err in IMPORT_ERRORS:
+            st.code(err)
+        st.info("Zorg dat `pseudonymizer.py` en `pdf_processor.py` in dezelfde map staan als `app.py`")
         st.stop()
     
-    missing_deps = check_dependencies()
-    if missing_deps and "opencv-python" not in str(missing_deps):
-        st.error(f"❌ Missende packages: {', '.join(missing_deps)}")
-        st.code(f"pip install {' '.join(missing_deps)}", language="bash")
-        st.stop()
+    if not PDF_SUPPORT:
+        st.warning("⚠️ PDF ondersteuning uitgeschakeld (dependencies missen). Alleen TXT bestanden werken.")
     
-    # Sidebar settings
+    # Sidebar
     with st.sidebar:
         st.header("⚙️ Instellingen")
         
-        method = st.selectbox(
-            "Verwerkingsmethode",
-            options=["auto", "digital", "ocr", "handwriting"],
-            index=0,
-            help="Auto detecteert automatisch het beste type"
+        st.subheader("📅 Ongevalsdatum")
+        incident_date_str = st.text_input(
+            "Datum (dd-mm-jjjj)",
+            placeholder="bijv. 02-08-2012",
+            help="Alle datums worden relatief t.o.v. deze datum weergegeven (T-30, T+0, T+90)"
         )
+        incident_date = parse_date_input(incident_date_str)
         
-        dpi = st.slider(
-            "DPI (kwaliteit)",
-            min_value=150,
-            max_value=600,
-            value=300,
-            step=50,
-            help="Hoger = betere kwaliteit, maar langzamer"
-        )
-        
-        enhance = st.checkbox(
-            "Beeldverbetering",
-            value=True,
-            help="Verbetert OCR voor handgeschreven tekst"
-        )
-        
-        lang = st.selectbox(
-            "OCR Taal",
-            options=["nld+eng", "nld", "eng", "deu+nld"],
-            index=0
-        )
-        
-        medical_postprocess = st.checkbox(
-            "Medische post-processing",
-            value=True,
-            help="Corrigeert veelvoorkomende OCR-fouten in medische termen"
-        )
+        if incident_date_str and not incident_date:
+            st.error("Ongeldig datumformaat")
+        elif incident_date:
+            st.success(f"✓ {incident_date.strftime('%d-%m-%Y')}")
         
         st.divider()
-        st.markdown("### 📊 Legenda confidence")
+        
+        if PDF_SUPPORT:
+            st.subheader("📄 PDF Instellingen")
+            
+            pdf_method = st.selectbox(
+                "OCR Methode",
+                options=["auto", "digital", "ocr", "handwriting"],
+                index=0,
+                help="Auto detecteert automatisch"
+            )
+            
+            pdf_dpi = st.slider(
+                "DPI",
+                min_value=150,
+                max_value=600,
+                value=300,
+                step=50,
+                help="Hoger = beter voor handschrift"
+            )
+            
+            pdf_enhance = st.checkbox(
+                "Beeldverbetering",
+                value=True
+            )
+            
+            pdf_lang = st.selectbox(
+                "OCR Taal",
+                options=["nld+eng", "nld", "eng"],
+                index=0
+            )
+        
+        st.divider()
+        
+        st.subheader("📊 Legenda")
         st.markdown("""
-        - 🟢 **>80%** Uitstekend
-        - 🟡 **60-80%** Acceptabel  
-        - 🔴 **<60%** Controleer handmatig
+        **Pseudoniemen:**
+        - `[PERSOON_1]` = Naam
+        - `[BSN]` = Burgerservicenummer
+        - `[ADRES_1]` = Adres
+        - `[TELEFOON]` = Telefoonnummer
+        - `[GEBOORTEDATUM]` = Geboortedatum
+        - `[T+30]` = 30 dagen na ongeval
+        - `[T-10]` = 10 dagen vóór ongeval
         """)
     
     # Main content
     col1, col2 = st.columns([1, 1])
     
     with col1:
-        st.header("📤 Upload")
+        st.header("📤 Upload Bestand")
+        
+        # File types bepalen
+        allowed_types = ["txt"]
+        if PDF_SUPPORT:
+            allowed_types.append("pdf")
         
         uploaded_file = st.file_uploader(
-            "Sleep een PDF hierheen of klik om te selecteren",
-            type=["pdf"],
-            help="Alleen PDF bestanden worden geaccepteerd"
+            f"Sleep een bestand hierheen ({', '.join(allowed_types).upper()})",
+            type=allowed_types,
+            help="PDF bestanden worden automatisch verwerkt met OCR indien nodig"
         )
         
         if uploaded_file:
-            st.success(f"✅ **{uploaded_file.name}** ({uploaded_file.size / 1024:.1f} KB)")
+            file_ext = Path(uploaded_file.name).suffix.lower()
+            file_size = uploaded_file.size / 1024  # KB
+            
+            st.success(f"✅ **{uploaded_file.name}** ({file_size:.1f} KB)")
             
             # Process button
-            if st.button("🚀 Verwerk PDF", type="primary", use_container_width=True):
+            if st.button("🚀 Verwerk & Pseudonimiseer", type="primary", use_container_width=True):
                 
-                # Save uploaded file temporarily
-                with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
-                    tmp.write(uploaded_file.getbuffer())
-                    tmp_path = tmp.name
+                extracted_text = ""
+                confidence = 1.0
+                extraction_errors = []
                 
-                try:
-                    # Initialize processor
-                    processor = PDFProcessor(
-                        tesseract_lang=lang,
-                        dpi=dpi,
-                        enhance_images=enhance
-                    )
+                # === STAP 1: TEKST EXTRACTIE ===
+                with st.status("Bezig met verwerken...", expanded=True) as status:
                     
-                    # Process with progress
-                    with st.spinner("PDF wordt verwerkt..."):
-                        force_method = None if method == "auto" else method
-                        result = processor.process(tmp_path, force_method=force_method)
+                    if file_ext == ".pdf":
+                        st.write("📄 PDF wordt verwerkt met OCR...")
+                        
+                        # Save temp file
+                        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+                            tmp.write(uploaded_file.getbuffer())
+                            tmp_path = tmp.name
+                        
+                        try:
+                            extracted_text, confidence, extraction_errors = extract_text_from_pdf(
+                                tmp_path, 
+                                pdf_method, 
+                                pdf_dpi, 
+                                pdf_enhance, 
+                                pdf_lang
+                            )
+                        finally:
+                            if os.path.exists(tmp_path):
+                                os.unlink(tmp_path)
+                                
+                        st.write(f"✓ Tekst geëxtraheerd (confidence: {confidence:.0%})")
+                        
+                    else:  # TXT
+                        st.write("📝 Tekstbestand wordt gelezen...")
+                        extracted_text = extract_text_from_txt(uploaded_file.getvalue())
+                        st.write("✓ Tekst geladen")
                     
-                    # Store result in session state
-                    st.session_state['result'] = result
-                    st.session_state['filename'] = uploaded_file.name
+                    # === STAP 2: PSEUDONIMISERING ===
+                    st.write("🔒 Pseudonimisering wordt uitgevoerd...")
                     
-                    if medical_postprocess:
-                        st.session_state['processed_text'] = post_process_medical_text(result.combined_text)
-                    else:
-                        st.session_state['processed_text'] = result.combined_text
+                    pseudonymizer = MedicalPseudonymizer(incident_date=incident_date)
+                    result = pseudonymizer.pseudonymize(extracted_text)
                     
-                finally:
-                    # Cleanup temp file
-                    if os.path.exists(tmp_path):
-                        os.unlink(tmp_path)
+                    st.write(f"✓ {sum(result.statistics.values())} items gepseudonimiseerd")
+                    
+                    status.update(label="✅ Verwerking voltooid!", state="complete")
+                
+                # Store results in session
+                st.session_state['result'] = result
+                st.session_state['confidence'] = confidence
+                st.session_state['extraction_errors'] = extraction_errors
+                st.session_state['filename'] = uploaded_file.name
+                st.session_state['original_text'] = extracted_text
     
     with col2:
         st.header("📋 Resultaat")
         
         if 'result' in st.session_state:
-            result = st.session_state['result']
-            processed_text = st.session_state['processed_text']
+            result: PseudonymizationResult = st.session_state['result']
+            confidence = st.session_state['confidence']
+            extraction_errors = st.session_state['extraction_errors']
             
             # Metrics
             col_a, col_b, col_c = st.columns(3)
             
             with col_a:
-                st.metric("Pagina's", result.total_pages)
+                total_replacements = sum(result.statistics.values())
+                st.metric("Vervangingen", total_replacements)
             
             with col_b:
-                conf = result.overall_confidence
-                if conf >= 0.8:
+                if confidence >= 0.8:
                     emoji = "🟢"
-                elif conf >= 0.6:
+                elif confidence >= 0.6:
                     emoji = "🟡"
                 else:
                     emoji = "🔴"
-                st.metric("Confidence", f"{emoji} {conf:.0%}")
+                st.metric("OCR Confidence", f"{emoji} {confidence:.0%}")
             
             with col_c:
-                st.metric("Methode", result.processing_method)
+                persons = result.statistics.get('names', 0)
+                st.metric("Personen", persons)
             
             # Errors/warnings
-            if result.errors:
-                for error in result.errors:
-                    st.error(f"⚠️ {error}")
+            if extraction_errors:
+                for err in extraction_errors:
+                    st.error(f"⚠️ {err}")
             
-            # Page details (expandable)
-            with st.expander("📄 Details per pagina"):
-                for page in result.pages:
-                    conf = page.confidence
-                    emoji = "🟢" if conf >= 0.8 else "🟡" if conf >= 0.6 else "🔴"
-                    hw = "✍️" if page.has_handwriting else ""
-                    
-                    st.markdown(f"**Pagina {page.page_number}:** {emoji} {conf:.0%} {hw}")
-                    
-                    if page.warnings:
-                        for w in page.warnings:
-                            st.caption(f"⚠️ {w}")
+            if result.warnings:
+                for w in result.warnings:
+                    st.warning(f"⚠️ {w}")
             
-            # Text output
-            st.text_area(
-                "Geëxtraheerde tekst",
-                processed_text,
-                height=400,
-                key="output_text"
-            )
+            # Incident date info
+            if result.incident_date:
+                st.info(f"📅 Ongevalsdatum: {result.incident_date.strftime('%d-%m-%Y')} (T+0)")
             
-            # Download button
-            st.download_button(
-                label="⬇️ Download als TXT",
-                data=processed_text,
-                file_name=f"{Path(st.session_state['filename']).stem}_extracted.txt",
-                mime="text/plain",
-                use_container_width=True
-            )
+            # Statistics expander
+            with st.expander("📊 Statistieken per categorie"):
+                if result.statistics:
+                    for category, count in sorted(result.statistics.items()):
+                        label = {
+                            'names': '👤 Namen',
+                            'dates': '📅 Datums',
+                            'bsn': '🔢 BSN',
+                            'addresses': '🏠 Adressen',
+                            'postal_codes': '📮 Postcodes',
+                            'phone': '📞 Telefoon',
+                            'email': '📧 Email',
+                            'birth_dates': '🎂 Geboortedatums',
+                            'case_numbers': '📁 Zaaknummers'
+                        }.get(category, category)
+                        st.write(f"{label}: **{count}**")
+                else:
+                    st.write("Geen PII gedetecteerd")
+            
+            # Name mapping expander
+            with st.expander("🔄 Naam mapping (voor audit)"):
+                if result.replacements:
+                    for original, pseudo in result.replacements.items():
+                        st.code(f"{original} → {pseudo}")
+                else:
+                    st.write("Geen namen vervangen")
+            
+            # Tabs voor original vs pseudonymized
+            tab1, tab2 = st.tabs(["🔒 Gepseudonimiseerd", "📝 Origineel (alleen voor controle)"])
+            
+            with tab1:
+                st.text_area(
+                    "Gepseudonimiseerde tekst",
+                    result.pseudonymized_text,
+                    height=400,
+                    key="output_pseudo"
+                )
+                
+                # Download button
+                st.download_button(
+                    label="⬇️ Download Gepseudonimiseerd",
+                    data=result.pseudonymized_text,
+                    file_name=f"{Path(st.session_state['filename']).stem}_pseudoniem.txt",
+                    mime="text/plain",
+                    use_container_width=True,
+                    type="primary"
+                )
+            
+            with tab2:
+                st.warning("⚠️ Dit bevat nog originele persoonsgegevens!")
+                st.text_area(
+                    "Originele tekst",
+                    st.session_state['original_text'],
+                    height=400,
+                    key="output_original"
+                )
         else:
-            st.info("👈 Upload een PDF om te beginnen")
+            st.info("👈 Upload een bestand om te beginnen")
     
     # Footer
     st.divider()
-    st.caption("Kinetic Medische Expertises | ⚠️ Gebruik alleen voor geanonimiseerde testdata")
+    col_f1, col_f2 = st.columns(2)
+    with col_f1:
+        st.caption("Kinetic Medische Expertises")
+    with col_f2:
+        st.caption("⚠️ Verwerk géén echte patiëntdata zonder verwerkersovereenkomst")
 
 
 if __name__ == "__main__":
